@@ -1,168 +1,168 @@
 /**
- * @license Copyright 2016 Google Inc. All Rights Reserved.
+ * @license Copyright 2016 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 'use strict';
 
+/** @typedef {import('../gather/driver.js')} Driver */
+
 /**
- * Nexus 5X metrics adapted from emulated_devices/module.json
+ * @type {LH.Crdp.Emulation.SetDeviceMetricsOverrideRequest}
  */
-const NEXUS5X_EMULATION_METRICS = {
+const MOTOG4_EMULATION_METRICS = {
   mobile: true,
-  screenWidth: 412,
-  screenHeight: 732,
-  width: 412,
-  height: 732,
+  screenWidth: 360,
+  screenHeight: 640,
+  width: 360,
+  height: 640,
   positionX: 0,
   positionY: 0,
   scale: 1,
+  // Moto G4 is really 3, but a higher value here works against
+  // our perf recommendations.
+  // https://github.com/GoogleChrome/lighthouse/issues/10741#issuecomment-626903508
   deviceScaleFactor: 2.625,
-  fitWindow: false,
   screenOrientation: {
     angle: 0,
-    type: 'portraitPrimary'
-  }
-};
-
-const NEXUS5X_USERAGENT = {
-  userAgent: 'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5 Build/MRA58N) AppleWebKit/537.36' +
-    '(KHTML, like Gecko) Chrome/61.0.3116.0 Mobile Safari/537.36'
+    type: 'portraitPrimary',
+  },
 };
 
 /**
- * Adjustments needed for DevTools network throttling to simulate
- * more realistic network conditions.
- * See: crbug.com/721112
+ * Desktop metrics adapted from emulated_devices/module.json
+ * @type {LH.Crdp.Emulation.SetDeviceMetricsOverrideRequest}
  */
-const LATENCY_FACTOR = 3.75;
-const THROUGHPUT_FACTOR = 0.9;
-
-const TARGET_LATENCY = 150; // 150ms
-const TARGET_DOWNLOAD_THROUGHPUT = Math.floor(1.6 * 1024 * 1024 / 8); // 1.6Mbps
-const TARGET_UPLOAD_THROUGHPUT = Math.floor(750 * 1024 / 8); // 750Kbps
-
-const TYPICAL_MOBILE_THROTTLING_METRICS = {
-  targetLatency: TARGET_LATENCY,
-  latency: TARGET_LATENCY * LATENCY_FACTOR,
-  targetDownloadThroughput: TARGET_DOWNLOAD_THROUGHPUT,
-  downloadThroughput: TARGET_DOWNLOAD_THROUGHPUT * THROUGHPUT_FACTOR,
-  targetUploadThroughput: TARGET_UPLOAD_THROUGHPUT,
-  uploadThroughput: TARGET_UPLOAD_THROUGHPUT * THROUGHPUT_FACTOR,
-  offline: false
+const DESKTOP_EMULATION_METRICS = {
+  mobile: false,
+  width: 1350,
+  height: 940,
+  deviceScaleFactor: 1,
 };
+
+// eslint-disable-next-line max-len
+const MOTOG4_USERAGENT = 'Mozilla/5.0 (Linux; Android 7.0; Moto G (4)) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4143.7 Mobile Safari/537.36 Chrome-Lighthouse';
+// eslint-disable-next-line max-len
+const DESKTOP_USERAGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4143.7 Safari/537.36 Chrome-Lighthouse';
 
 const OFFLINE_METRICS = {
   offline: true,
   // values of 0 remove any active throttling. crbug.com/456324#c9
   latency: 0,
   downloadThroughput: 0,
-  uploadThroughput: 0
+  uploadThroughput: 0,
 };
 
 const NO_THROTTLING_METRICS = {
   latency: 0,
   downloadThroughput: 0,
   uploadThroughput: 0,
-  offline: false
+  offline: false,
 };
 
 const NO_CPU_THROTTLE_METRICS = {
-  rate: 1
-};
-const CPU_THROTTLE_METRICS = {
-  rate: 4
+  rate: 1,
 };
 
-function enableNexus5X(driver) {
-  /**
-   * Finalizes touch emulation by enabling `"ontouchstart" in window` feature detect
-   * to work. Messy hack, though copied verbatim from DevTools' emulation/TouchModel.js
-   * where it's been working for years. addScriptToEvaluateOnLoad runs before any of the
-   * page's JavaScript executes.
-   */
-  /* eslint-disable no-proto */ /* global window, document */ /* istanbul ignore next */
-  const injectedTouchEventsFunction = function() {
-    const touchEvents = ['ontouchstart', 'ontouchend', 'ontouchmove', 'ontouchcancel'];
-    const recepients = [window.__proto__, document.__proto__];
-    for (let i = 0; i < touchEvents.length; ++i) {
-      for (let j = 0; j < recepients.length; ++j) {
-        if (!(touchEvents[i] in recepients[j])) {
-          Object.defineProperty(recepients[j], touchEvents[i], {
-            value: null, writable: true, configurable: true, enumerable: true
-          });
-        }
-      }
-    }
+const emulationParams = {
+  mobile: {
+    userAgent: MOTOG4_USERAGENT,
+    metrics: MOTOG4_EMULATION_METRICS,
+    touchEnabled: true,
+  },
+  desktop: {
+    userAgent: DESKTOP_USERAGENT,
+    metrics: DESKTOP_EMULATION_METRICS,
+    touchEnabled: false,
+  },
+};
+
+/**
+ *
+ * @param {Driver} driver
+ * @param {LH.Config.Settings} settings
+ * @return {Promise<void>}
+ */
+async function emulate(driver, settings) {
+  if (!settings.emulatedFormFactor || settings.emulatedFormFactor === 'none') return;
+  const params = emulationParams[settings.emulatedFormFactor];
+
+  // In DevTools, emulation is applied before Lighthouse starts (to deal with viewport emulation bugs)
+  // As a result, we don't double-apply viewport emulation (devtools sets `internalDisableDeviceScreenEmulation`).
+  // UA emulation, however, is lost in the protocol handover from devtools frontend to the audits_worker. So it's always applied.
+
+  // Network.enable must be called for UA overriding to work
+  await driver.sendCommand('Network.enable');
+  await driver.sendCommand('Network.setUserAgentOverride', {userAgent: params.userAgent});
+
+  if (!settings.internalDisableDeviceScreenEmulation) {
+    await driver.sendCommand('Emulation.setDeviceMetricsOverride', params.metrics);
+    await driver.sendCommand('Emulation.setTouchEmulationEnabled', {enabled: params.touchEnabled});
+  }
+}
+
+
+/**
+ * @param {Driver} driver
+ * @param {Required<LH.ThrottlingSettings>} throttlingSettings
+ * @return {Promise<void>}
+ */
+function enableNetworkThrottling(driver, throttlingSettings) {
+  /** @type {LH.Crdp.Network.EmulateNetworkConditionsRequest} */
+  const conditions = {
+    offline: false,
+    latency: throttlingSettings.requestLatencyMs || 0,
+    downloadThroughput: throttlingSettings.downloadThroughputKbps || 0,
+    uploadThroughput: throttlingSettings.uploadThroughputKbps || 0,
   };
-  /* eslint-enable */
 
-  return Promise.all([
-    driver.sendCommand('Emulation.setDeviceMetricsOverride', NEXUS5X_EMULATION_METRICS),
-    // required for screenshotting emulated page size, rather than full size
-    driver.sendCommand('Emulation.setVisibleSize', {
-      width: NEXUS5X_EMULATION_METRICS.screenWidth,
-      height: NEXUS5X_EMULATION_METRICS.screenHeight
-    }),
-    // Network.enable must be called for UA overriding to work
-    driver.sendCommand('Network.enable'),
-    driver.sendCommand('Network.setUserAgentOverride', NEXUS5X_USERAGENT),
-    driver.sendCommand('Emulation.setTouchEmulationEnabled', {
-      enabled: true,
-      configuration: 'mobile'
-    }),
-    driver.sendCommand('Page.addScriptToEvaluateOnLoad', {
-      scriptSource: '(' + injectedTouchEventsFunction.toString() + ')()'
-    })
-  ]);
+  // DevTools expects throughput in bytes per second rather than kbps
+  conditions.downloadThroughput = Math.floor(conditions.downloadThroughput * 1024 / 8);
+  conditions.uploadThroughput = Math.floor(conditions.uploadThroughput * 1024 / 8);
+  return driver.sendCommand('Network.emulateNetworkConditions', conditions);
 }
 
-function enableNetworkThrottling(driver) {
-  return driver.sendCommand('Network.emulateNetworkConditions', TYPICAL_MOBILE_THROTTLING_METRICS);
-}
-
-function disableNetworkThrottling(driver) {
+/**
+ * @param {Driver} driver
+ * @return {Promise<void>}
+ */
+function clearAllNetworkEmulation(driver) {
   return driver.sendCommand('Network.emulateNetworkConditions', NO_THROTTLING_METRICS);
 }
 
+/**
+ * @param {Driver} driver
+ * @return {Promise<void>}
+ */
 function goOffline(driver) {
   return driver.sendCommand('Network.emulateNetworkConditions', OFFLINE_METRICS);
 }
 
-function enableCPUThrottling(driver) {
-  return driver.sendCommand('Emulation.setCPUThrottlingRate', CPU_THROTTLE_METRICS);
+/**
+ * @param {Driver} driver
+ * @param {Required<LH.ThrottlingSettings>} throttlingSettings
+ * @return {Promise<void>}
+ */
+function enableCPUThrottling(driver, throttlingSettings) {
+  const rate = throttlingSettings.cpuSlowdownMultiplier;
+  return driver.sendCommand('Emulation.setCPUThrottlingRate', {rate});
 }
 
+/**
+ * @param {Driver} driver
+ * @return {Promise<void>}
+ */
 function disableCPUThrottling(driver) {
   return driver.sendCommand('Emulation.setCPUThrottlingRate', NO_CPU_THROTTLE_METRICS);
 }
 
-function getEmulationDesc() {
-  const {latency, downloadThroughput, uploadThroughput} = TYPICAL_MOBILE_THROTTLING_METRICS;
-  const byteToMbit = bytes => (bytes / 1024 / 1024 * 8).toFixed(1);
-  return {
-    'deviceEmulation': 'Nexus 5X',
-    'cpuThrottling': `${CPU_THROTTLE_METRICS.rate}x slowdown`,
-    'networkThrottling': `${latency}ms RTT, ${byteToMbit(downloadThroughput)}Mbps down, ` +
-        `${byteToMbit(uploadThroughput)}Mbps up`
-  };
-}
-
 module.exports = {
-  enableNexus5X,
+  emulate,
   enableNetworkThrottling,
-  disableNetworkThrottling,
+  clearAllNetworkEmulation,
   enableCPUThrottling,
   disableCPUThrottling,
   goOffline,
-  getEmulationDesc,
-  settings: {
-    NEXUS5X_EMULATION_METRICS,
-    NEXUS5X_USERAGENT,
-    TYPICAL_MOBILE_THROTTLING_METRICS,
-    OFFLINE_METRICS,
-    NO_THROTTLING_METRICS,
-    NO_CPU_THROTTLE_METRICS,
-    CPU_THROTTLE_METRICS
-  }
+  MOBILE_USERAGENT: MOTOG4_USERAGENT,
+  DESKTOP_USERAGENT,
 };

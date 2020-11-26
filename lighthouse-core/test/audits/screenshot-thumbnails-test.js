@@ -1,5 +1,5 @@
 /**
- * @license Copyright 2017 Google Inc. All Rights Reserved.
+ * @license Copyright 2017 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
@@ -7,92 +7,107 @@
 
 const fs = require('fs');
 const path = require('path');
-const assert = require('assert');
+const assert = require('assert').strict;
 
-const Runner = require('../../runner.js');
-const ScreenshotThumbnailsAudit = require('../../audits/screenshot-thumbnails');
-const TTFIAudit = require('../../audits/first-interactive');
-const TTCIAudit = require('../../audits/consistently-interactive');
+const ScreenshotThumbnailsAudit = require('../../audits/screenshot-thumbnails.js');
 const pwaTrace = require('../fixtures/traces/progressive-app-m60.json');
+const pwaDevtoolsLog = require('../fixtures/traces/progressive-app-m60.devtools.log.json');
 
-/* eslint-env mocha */
+/* eslint-env jest */
 
 describe('Screenshot thumbnails', () => {
-  let computedArtifacts;
-  let ttfiOrig;
-  let ttciOrig;
-  let ttfiReturn;
-  let ttciReturn;
-
-  before(() => {
-    computedArtifacts = Runner.instantiateComputedArtifacts();
-
-    // Monkey patch TTFI to simulate result
-    ttfiOrig = TTFIAudit.audit;
-    ttciOrig = TTCIAudit.audit;
-    TTFIAudit.audit = () => ttfiReturn || Promise.reject(new Error('oops!'));
-    TTCIAudit.audit = () => ttciReturn || Promise.reject(new Error('oops!'));
-  });
-
-  after(() => {
-    TTFIAudit.audit = ttfiOrig;
-    TTCIAudit.audit = ttciOrig;
-  });
-
-  beforeEach(() => {
-    ttfiReturn = null;
-    ttciReturn = null;
-  });
-
   it('should extract thumbnails from a trace', () => {
-    const artifacts = Object.assign({
-      traces: {defaultPass: pwaTrace}
-    }, computedArtifacts);
+    const options = {minimumTimelineDuration: 500};
+    const settings = {throttlingMethod: 'provided'};
+    const artifacts = {
+      traces: {defaultPass: pwaTrace},
+      devtoolsLogs: {}, // empty devtools logs to test just thumbnails without TTI behavior
+    };
 
-    return ScreenshotThumbnailsAudit.audit(artifacts).then(results => {
+    const context = {settings, options, computedCache: new Map()};
+    return ScreenshotThumbnailsAudit.audit(artifacts, context).then(results => {
       results.details.items.forEach((result, index) => {
         const framePath = path.join(__dirname,
             `../fixtures/traces/screenshots/progressive-app-frame-${index}.jpg`);
         const expectedData = fs.readFileSync(framePath, 'base64');
-        assert.equal(expectedData.length, result.data.length);
+        const actualData = result.data.slice('data:image/jpeg;base64,'.length);
+        expect(actualData).toEqual(expectedData);
       });
 
-      assert.ok(results.rawValue);
+      assert.equal(results.score, 1);
       assert.equal(results.details.items[0].timing, 82);
       assert.equal(results.details.items[2].timing, 245);
       assert.equal(results.details.items[9].timing, 818);
       assert.equal(results.details.items[0].timestamp, 225414253815);
     });
-  });
+  }, 10000);
 
-  it('should scale the timeline to TTFI', () => {
-    const artifacts = Object.assign({
-      traces: {defaultPass: pwaTrace}
-    }, computedArtifacts);
+  it('should scale the timeline to TTI when observed', () => {
+    const options = {minimumTimelineDuration: 500};
+    const settings = {throttlingMethod: 'devtools'};
+    const artifacts = {
+      traces: {defaultPass: pwaTrace},
+      devtoolsLogs: {defaultPass: pwaDevtoolsLog},
+    };
 
-    ttfiReturn = Promise.resolve({rawValue: 4000});
-    return ScreenshotThumbnailsAudit.audit(artifacts).then(results => {
-      assert.equal(results.details.items[0].timing, 400);
-      assert.equal(results.details.items[9].timing, 4000);
-      const extrapolatedFrames = new Set(results.details.items.slice(3).map(f => f.data));
+    const context = {settings, options, computedCache: new Map()};
+    return ScreenshotThumbnailsAudit.audit(artifacts, context).then(results => {
+      assert.equal(results.details.items[0].timing, 158);
+      assert.equal(results.details.items[9].timing, 1582);
+
+      // last 5 frames should be equal to the last real frame
+      const extrapolatedFrames = new Set(results.details.items.slice(5).map(f => f.data));
       assert.ok(results.details.items[9].data.length > 100, 'did not have last frame');
       assert.ok(extrapolatedFrames.size === 1, 'did not extrapolate last frame');
     });
   });
 
-  it('should scale the timeline to TTCI', () => {
-    const artifacts = Object.assign({
-      traces: {defaultPass: pwaTrace}
-    }, computedArtifacts);
+  it('should not scale the timeline to TTI when simulate', () => {
+    const options = {minimumTimelineDuration: 500};
+    const settings = {throttlingMethod: 'simulate'};
+    const artifacts = {
+      traces: {defaultPass: pwaTrace},
+    };
 
-    ttfiReturn = Promise.resolve({rawValue: 8000});
-    ttciReturn = Promise.resolve({rawValue: 20000});
-    return ScreenshotThumbnailsAudit.audit(artifacts).then(results => {
-      assert.equal(results.details.items[0].timing, 2000);
-      assert.equal(results.details.items[9].timing, 20000);
-      const extrapolatedFrames = new Set(results.details.items.map(f => f.data));
-      assert.ok(results.details.items[9].data.length > 100, 'did not have last frame');
-      assert.ok(extrapolatedFrames.size === 1, 'did not extrapolate last frame');
+    const context = {settings, options, computedCache: new Map()};
+    return ScreenshotThumbnailsAudit.audit(artifacts, context).then(results => {
+      assert.equal(results.details.items[0].timing, 82);
+      assert.equal(results.details.items[9].timing, 818);
     });
+  });
+
+  it('should scale the timeline to minimumTimelineDuration', () => {
+    const settings = {throttlingMethod: 'simulate'};
+    const artifacts = {
+      traces: {defaultPass: pwaTrace},
+    };
+
+    const context = {settings, options: {}, computedCache: new Map()};
+    return ScreenshotThumbnailsAudit.audit(artifacts, context).then(results => {
+      assert.equal(results.details.items[0].timing, 300);
+      assert.equal(results.details.items[9].timing, 3000);
+    });
+  });
+
+  it('should handle nonsense times', async () => {
+    const infiniteTrace = JSON.parse(JSON.stringify(pwaTrace));
+    infiniteTrace.traceEvents.forEach(event => {
+      if (event.name === 'Screenshot') {
+        event.ts = Infinity;
+      }
+    });
+
+    const settings = {throttlingMethod: 'simulate'};
+    const artifacts = {
+      traces: {defaultPass: infiniteTrace},
+    };
+    const context = {settings, options: {}, computedCache: new Map()};
+
+    try {
+      await ScreenshotThumbnailsAudit.audit(artifacts, context);
+      assert.fail('should have thrown');
+    } catch (err) {
+      assert.equal(err.message, 'INVALID_SPEEDLINE');
+    }
   });
 });

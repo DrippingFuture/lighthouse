@@ -1,11 +1,13 @@
 /**
- * @license Copyright 2016 Google Inc. All Rights Reserved.
+ * @license Copyright 2016 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 'use strict';
 
 /* global logger, FirebaseAuth, idbKeyval, getFilenamePrefix */
+
+/** @typedef {{etag: ?string, content: LH.Result}} CachableGist */
 
 /**
  * Wrapper around the GitHub API for reading/writing gists.
@@ -20,10 +22,14 @@ class GithubApi {
     return '.lighthouse.report.json';
   }
 
+  getFirebaseAuth() {
+    return this._auth;
+  }
+
   /**
    * Creates a gist under the users account.
-   * @param {!ReportRenderer.ReportJSON} jsonFile The gist file body.
-   * @return {!Promise<string>} id of the created gist.
+   * @param {LH.Result} jsonFile The gist file body.
+   * @return {Promise<string>} id of the created gist.
    */
   createGist(jsonFile) {
     if (this._saving) {
@@ -36,24 +42,24 @@ class GithubApi {
     return this._auth.getAccessToken()
       .then(accessToken => {
         const filename = getFilenamePrefix({
-          url: jsonFile.url,
-          generatedTime: jsonFile.generatedTime
+          finalUrl: jsonFile.finalUrl,
+          fetchTime: jsonFile.fetchTime,
         });
         const body = {
           description: 'Lighthouse json report',
           public: false,
           files: {
             [`${filename}${GithubApi.LH_JSON_EXT}`]: {
-              content: JSON.stringify(jsonFile)
-            }
-          }
+              content: JSON.stringify(jsonFile),
+            },
+          },
         };
 
         const request = new Request('https://api.github.com/gists', {
           method: 'POST',
           headers: new Headers({Authorization: `token ${accessToken}`}),
           // Stringify twice so quotes are escaped for POST request to succeed.
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
         });
         return fetch(request);
       })
@@ -71,7 +77,7 @@ class GithubApi {
   /**
    * Fetches a Lighthouse report from a gist.
    * @param {string} id The id of a gist.
-   * @return {!Promise<!ReportRenderer.ReportJSON>}
+   * @return {Promise<LH.Result>}
    */
   getGistFileContentAsJson(id) {
     logger.log('Fetching report from GitHub...', false);
@@ -85,16 +91,16 @@ class GithubApi {
         headers.set('Authorization', `token ${accessToken}`);
       }
 
-      return idbKeyval.get(id).then(cachedGist => {
+      return idbKeyval.get(id).then(/** @param {?CachableGist} cachedGist */ (cachedGist) => {
         if (cachedGist && cachedGist.etag) {
           headers.set('If-None-Match', cachedGist.etag);
         }
 
         // Always make the request to see if there's newer content.
         return fetch(`https://api.github.com/gists/${id}`, {headers}).then(resp => {
-          const remaining = resp.headers.get('X-RateLimit-Remaining');
-          const limit = resp.headers.get('X-RateLimit-Limit');
-          if (Number(remaining) < 10) {
+          const remaining = Number(resp.headers.get('X-RateLimit-Remaining'));
+          const limit = Number(resp.headers.get('X-RateLimit-Limit'));
+          if (remaining < 10) {
             logger.warn('Approaching GitHub\'s rate limit. ' +
                         `${limit - remaining}/${limit} requests used. Consider signing ` +
                         'in to increase this limit.');
@@ -102,7 +108,7 @@ class GithubApi {
 
           if (!resp.ok) {
             if (resp.status === 304) {
-              return cachedGist;
+              return Promise.resolve(cachedGist);
             } else if (resp.status === 404) {
               // Delete the entry from IDB if it no longer exists on the server.
               idbKeyval.delete(id); // Note: async.
@@ -112,11 +118,17 @@ class GithubApi {
 
           const etag = resp.headers.get('ETag');
           return resp.json().then(json => {
+            const gistFiles = Object.keys(json.files);
             // Attempt to use first file in gist with report extension.
-            const filename = Object.keys(json.files)
-                .find(filename => filename.endsWith(GithubApi.LH_JSON_EXT));
+            let filename = gistFiles.find(filename => filename.endsWith(GithubApi.LH_JSON_EXT));
+            // Otherwise, fall back to first json file in gist
             if (!filename) {
-              throw new Error(`gist ${id} does not contain a Lighthouse report`);
+              filename = gistFiles.find(filename => filename.endsWith('.json'));
+            }
+            if (!filename) {
+              throw new Error(
+                `Failed to find a Lighthouse report (*${GithubApi.LH_JSON_EXT}) in gist ${id}`
+              );
             }
             const f = json.files[filename];
             if (f.truncated) {
@@ -124,7 +136,8 @@ class GithubApi {
                 .then(resp => resp.json())
                 .then(content => ({etag, content}));
             }
-            return {etag, content: JSON.parse(f.content)};
+            const lhr = /** @type {LH.Result} */ (JSON.parse(f.content));
+            return {etag, content: lhr};
           });
         });
       });
@@ -134,12 +147,14 @@ class GithubApi {
       // not return a 304 and so will be overwritten.
       return idbKeyval.set(id, response).then(_ => {
         logger.hide();
+        // @ts-expect-error - TODO(bckenny): tsc unable to flatten promise chain here
         return response.content;
       });
     });
   }
 }
 
+// node export for testing.
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = GithubApi;
 }

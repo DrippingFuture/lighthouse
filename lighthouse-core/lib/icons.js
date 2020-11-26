@@ -1,12 +1,14 @@
 /**
- * @license Copyright 2016 Google Inc. All Rights Reserved.
+ * @license Copyright 2016 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 'use strict';
 
+const URL = require('./url-shim.js');
+
 /**
- * @param {!Manifest=} manifest
+ * @param {NonNullable<LH.Artifacts.Manifest['value']>} manifest
  * @return {boolean} Does the manifest have any icons?
  */
 function doExist(manifest) {
@@ -21,19 +23,34 @@ function doExist(manifest) {
 
 /**
  * @param {number} sizeRequirement
- * @param {!Manifest} manifest
- * @return {!Array<string>} Value of satisfactory sizes (eg. ['192x192', '256x256'])
+ * @param {NonNullable<LH.Artifacts.Manifest['value']>} manifest
+ * @return {Array<string>} Value of satisfactory sizes (eg. ['192x192', '256x256'])
  */
-function sizeAtLeast(sizeRequirement, manifest) {
+function pngSizedAtLeast(sizeRequirement, manifest) {
   // An icon can be provided for a single size, or for multiple sizes.
   // To handle both, we flatten all found sizes into a single array.
   const iconValues = manifest.icons.value;
-  const nestedSizes = iconValues.map(icon => icon.value.sizes.value);
-  const flattenedSizes = [].concat(...nestedSizes);
+  /** @type {Array<string>} */
+  const flattenedSizes = [];
+  iconValues
+    .filter(icon => {
+      const typeHint = icon.value.type.value;
+      if (typeHint) {
+        // If a type hint is present, filter out icons that are not 'image/png'.
+        return typeHint === 'image/png';
+      }
+      // Otherwise, fall back to filtering on the icons' extension.
+      const src = icon.value.src.value;
+      return src && new URL(src).pathname.endsWith('.png');
+    })
+    .forEach(icon => {
+      // check that the icon has a size
+      if (icon.value.sizes.value) {
+        flattenedSizes.push(...icon.value.sizes.value);
+      }
+    });
 
   return flattenedSizes
-      // First, filter out any undefined values, in case an icon was defined without a size
-      .filter(size => typeof size === 'string')
       // discard sizes that are not AAxBB (eg. "any")
       .filter(size => /\d+x\d+/.test(size))
       .filter(size => {
@@ -49,7 +66,21 @@ function sizeAtLeast(sizeRequirement, manifest) {
       });
 }
 
+/**
+ * @param {NonNullable<LH.Artifacts.Manifest['value']>} manifest
+ * @return {boolean} Does the manifest icons value contain at least one icon with purpose including "maskable"
+ */
+function containsMaskableIcon(manifest) {
+  const iconValues = manifest.icons.value;
+  return iconValues.some(icon => {
+    return icon.value.purpose &&
+      icon.value.purpose.value &&
+      icon.value.purpose.value.includes('maskable');
+  });
+}
+
 module.exports = {
   doExist,
-  sizeAtLeast
+  pngSizedAtLeast,
+  containsMaskableIcon,
 };

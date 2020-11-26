@@ -1,117 +1,135 @@
 /**
- * @license Copyright 2017 Google Inc. All Rights Reserved.
+ * @license Copyright 2017 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 
 /**
  * @fileoverview Audits a page to see how the size of DOM it creates. Stats like
- * tree depth, # children, and total nodes are returned. The score is calculated
- * based solely on the total number of nodes found on the page.
+ * tree depth, # children, and total elements are returned. The score is calculated
+ * based solely on the total number of elements found on the page.
  */
 
 'use strict';
 
-const Audit = require('../audit');
-const statistics = require('../../lib/statistics');
-const Util = require('../../report/v2/renderer/util.js');
+const Audit = require('../audit.js');
+const i18n = require('../../lib/i18n/i18n.js');
 
-const MAX_DOM_NODES = 1500;
-const MAX_DOM_TREE_WIDTH = 60;
-const MAX_DOM_TREE_DEPTH = 32;
+const UIStrings = {
+  /** Title of a diagnostic audit that provides detail on the size of the web page's DOM. The size of a DOM is characterized by the total number of DOM elements and greatest DOM depth. This descriptive title is shown to users when the amount is acceptable and no user action is required. */
+  title: 'Avoids an excessive DOM size',
+  /** Title of a diagnostic audit that provides detail on the size of the web page's DOM. The size of a DOM is characterized by the total number of DOM elements and greatest DOM depth. This imperative title is shown to users when there is a significant amount of execution time that could be reduced. */
+  failureTitle: 'Avoid an excessive DOM size',
+  /** Description of a Lighthouse audit that tells the user *why* they should reduce the size of the web page's DOM. The size of a DOM is characterized by the total number of DOM elements and greatest DOM depth. This is displayed after a user expands the section to see more. No character length limits. 'Learn More' becomes link text to additional documentation. */
+  description: 'A large DOM will increase memory usage, cause longer ' +
+    '[style calculations](https://developers.google.com/web/fundamentals/performance/rendering/reduce-the-scope-and-complexity-of-style-calculations), ' +
+    'and produce costly [layout reflows](https://developers.google.com/speed/articles/reflow). [Learn more](https://web.dev/dom-size/).',
+  /** Table column header for the type of statistic. These statistics describe how big the DOM is (count of DOM elements, children, depth). */
+  columnStatistic: 'Statistic',
+  /** Table column header for the observed value of the DOM statistic. */
+  columnValue: 'Value',
+  /** [ICU Syntax] Label for an audit identifying the number of DOM elements found in the page. */
+  displayValue: `{itemCount, plural,
+    =1 {1 element}
+    other {# elements}
+    }`,
+  /** Label for the total number of DOM elements found in the page. */
+  statisticDOMElements: 'Total DOM Elements',
+  /** Label for the numeric value of the maximum depth in the page's DOM tree. */
+  statisticDOMDepth: 'Maximum DOM Depth',
+  /** Label for the numeric value of the maximum number of children any DOM element in the page has. The element described will have the most children in the page. */
+  statisticDOMWidth: 'Maximum Child Elements',
+};
 
-// Parameters for log-normal CDF scoring. See https://www.desmos.com/calculator/9cyxpm5qgp.
-const SCORING_POINT_OF_DIMINISHING_RETURNS = 2400;
-const SCORING_MEDIAN = 3000;
+const str_ = i18n.createMessageInstanceIdFn(__filename, UIStrings);
 
 class DOMSize extends Audit {
-  static get MAX_DOM_NODES() {
-    return MAX_DOM_NODES;
-  }
-
   /**
-   * @return {!AuditMeta}
+   * @return {LH.Audit.Meta}
    */
   static get meta() {
     return {
-      category: 'Performance',
-      name: 'dom-size',
-      description: 'Avoids an excessive DOM size',
-      failureDescription: 'Uses an excessive DOM size',
-      optimalValue: `< ${DOMSize.MAX_DOM_NODES.toLocaleString()} nodes`,
-      helpText: 'Browser engineers recommend pages contain fewer than ' +
-        `~${Util.formatNumber(DOMSize.MAX_DOM_NODES)} DOM nodes. The sweet spot is a tree ` +
-        `depth < ${MAX_DOM_TREE_DEPTH} elements and fewer than ${MAX_DOM_TREE_WIDTH} ` +
-        'children/parent element. A large DOM can increase memory usage, cause longer ' +
-        '[style calculations](https://developers.google.com/web/fundamentals/performance/rendering/reduce-the-scope-and-complexity-of-style-calculations), ' +
-        'and produce costly [layout reflows](https://developers.google.com/speed/articles/reflow). [Learn more](https://developers.google.com/web/fundamentals/performance/rendering/).',
-      scoringMode: Audit.SCORING_MODES.NUMERIC,
-      requiredArtifacts: ['DOMStats']
+      id: 'dom-size',
+      title: str_(UIStrings.title),
+      failureTitle: str_(UIStrings.failureTitle),
+      description: str_(UIStrings.description),
+      scoreDisplayMode: Audit.SCORING_MODES.NUMERIC,
+      requiredArtifacts: ['DOMStats'],
     };
   }
 
   /**
-   * @param {!Artifacts} artifacts
-   * @return {!AuditResult}
+   * @return {LH.Audit.ScoreOptions}
    */
-  static audit(artifacts) {
-    const stats = artifacts.DOMStats;
-
-    /**
-     * html >
-     *   body >
-     *     div >
-     *       span
-     */
-    const depthSnippet = stats.depth.pathToElement.reduce((str, curr, i) => {
-      return `${str}\n` + '  '.repeat(i) + `${curr} >`;
-    }, '').replace(/>$/g, '').trim();
-    const widthSnippet = 'Element with most children:\n' +
-        stats.width.pathToElement[stats.width.pathToElement.length - 1];
-
-    // Use the CDF of a log-normal distribution for scoring.
-    //   <= 1500: score≈100
-    //   3000: score=50
-    //   >= 5970: score≈0
-    const distribution = statistics.getLogNormalDistribution(
-        SCORING_MEDIAN, SCORING_POINT_OF_DIMINISHING_RETURNS);
-    let score = 100 * distribution.computeComplementaryPercentile(stats.totalDOMNodes);
-
-    // Clamp the score to 0 <= x <= 100.
-    score = Math.max(0, Math.min(100, score));
-
-    const cards = [{
-      title: 'Total DOM Nodes',
-      value: Util.formatNumber(stats.totalDOMNodes),
-      target: `< ${Util.formatNumber(MAX_DOM_NODES)} nodes`
-    }, {
-      title: 'DOM Depth',
-      value: Util.formatNumber(stats.depth.max),
-      snippet: depthSnippet,
-      target: `< ${Util.formatNumber(MAX_DOM_TREE_DEPTH)}`
-    }, {
-      title: 'Maximum Children',
-      value: Util.formatNumber(stats.width.max),
-      snippet: widthSnippet,
-      target: `< ${Util.formatNumber(MAX_DOM_TREE_WIDTH)} nodes`
-    }];
-
+  static get defaultOptions() {
     return {
-      rawValue: stats.totalDOMNodes,
-      optimalValue: this.meta.optimalValue,
-      score: Math.round(score),
-      displayValue: `${Util.formatNumber(stats.totalDOMNodes)} nodes`,
-      extendedInfo: {
-        value: cards
-      },
-      details: {
-        type: 'cards',
-        header: {type: 'text', text: 'View details'},
-        items: cards
-      }
+      // https://bigquery.cloud.google.com/table/httparchive:lighthouse.2018_04_01_mobile?pli=1
+      // see https://www.desmos.com/calculator/tsunbwqt3f
+      p10: 818,
+      median: 1400,
     };
   }
 
+
+  /**
+   * @param {LH.Artifacts} artifacts
+   * @param {LH.Audit.Context} context
+   * @return {LH.Audit.Product}
+   */
+  static audit(artifacts, context) {
+    const stats = artifacts.DOMStats;
+
+    const score = Audit.computeLogNormalScore(
+      {p10: context.options.p10, median: context.options.median},
+      stats.totalBodyElements
+    );
+
+    /** @type {LH.Audit.Details.Table['headings']} */
+    const headings = [
+      {key: 'statistic', itemType: 'text', text: str_(UIStrings.columnStatistic)},
+      {key: 'node', itemType: 'node', text: str_(i18n.UIStrings.columnElement)},
+      {key: 'value', itemType: 'numeric', text: str_(UIStrings.columnValue)},
+    ];
+
+    /** @type {LH.Audit.Details.Table['items']} */
+    const items = [
+      {
+        statistic: str_(UIStrings.statisticDOMElements),
+        value: stats.totalBodyElements,
+      },
+      {
+        node: /** @type {LH.Audit.Details.NodeValue} */ ({
+          type: 'node',
+          path: stats.depth.devtoolsNodePath,
+          snippet: stats.depth.snippet,
+          selector: stats.depth.selector,
+          nodeLabel: stats.depth.nodeLabel,
+        }),
+        statistic: str_(UIStrings.statisticDOMDepth),
+        value: stats.depth.max,
+      },
+      {
+        node: /** @type {LH.Audit.Details.NodeValue} */ ({
+          type: 'node',
+          path: stats.width.devtoolsNodePath,
+          snippet: stats.width.snippet,
+          selector: stats.width.selector,
+          nodeLabel: stats.width.nodeLabel,
+        }),
+        statistic: str_(UIStrings.statisticDOMWidth),
+        value: stats.width.max,
+      },
+    ];
+
+    return {
+      score,
+      numericValue: stats.totalBodyElements,
+      numericUnit: 'element',
+      displayValue: str_(UIStrings.displayValue, {itemCount: stats.totalBodyElements}),
+      details: Audit.makeTableDetails(headings, items),
+    };
+  }
 }
 
 module.exports = DOMSize;
+module.exports.UIStrings = UIStrings;

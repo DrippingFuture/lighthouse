@@ -1,102 +1,111 @@
 /**
- * @license Copyright 2016 Google Inc. All Rights Reserved.
+ * @license Copyright 2016 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 'use strict';
 
-/* global window, document, Node */
+/* global window, document, getNodeDetails */
 
-const Gatherer = require('./gatherer');
+const Gatherer = require('./gatherer.js');
 const fs = require('fs');
 const axeLibSource = fs.readFileSync(require.resolve('axe-core/axe.min.js'), 'utf8');
+const pageFunctions = require('../../lib/page-functions.js');
 
-// This is run in the page, not Lighthouse itself.
-// axe.run returns a promise which fulfills with a results object
-// containing any violations.
+/**
+ * This is run in the page, not Lighthouse itself.
+ * axe.run returns a promise which fulfills with a results object
+ * containing any violations.
+ * @return {Promise<LH.Artifacts.Accessibility>}
+ */
 /* istanbul ignore next */
 function runA11yChecks() {
+  // @ts-expect-error axe defined by axeLibSource
   return window.axe.run(document, {
     elementRef: true,
     runOnly: {
       type: 'tag',
       values: [
         'wcag2a',
-        'wcag2aa'
-      ]
+        'wcag2aa',
+      ],
     },
+    resultTypes: ['violations', 'inapplicable'],
     rules: {
       'tabindex': {enabled: true},
-      'table-fake-caption': {enabled: true},
-      'td-has-header': {enabled: true},
+      'accesskeys': {enabled: true},
+      'heading-order': {enabled: true},
+      'meta-viewport': {enabled: true},
+      'duplicate-id': {enabled: false},
+      'table-fake-caption': {enabled: false},
+      'td-has-header': {enabled: false},
+      'marquee': {enabled: false},
       'area-alt': {enabled: false},
+      'aria-dpub-role-fallback': {enabled: false},
+      'html-xml-lang-mismatch': {enabled: false},
       'blink': {enabled: false},
-      'server-side-image-map': {enabled: false}
-    }
-  }).then(axeResult => {
+      'server-side-image-map': {enabled: false},
+      'identical-links-same-purpose': {enabled: false},
+      'no-autoplay-audio': {enabled: false},
+      'svg-img-alt': {enabled: false},
+      'audio-caption': {enabled: false},
+    },
+    // @ts-expect-error
+  }).then(axeResults => {
+    // axe just scrolled the page, scroll back to the top of the page so that element positions
+    // are relative to the top of the page
+    document.documentElement.scrollTop = 0;
+
+    // @ts-expect-error
+    const augmentAxeNodes = result => {
+      // @ts-expect-error
+      result.nodes.forEach(node => {
+        // @ts-expect-error - getNodeDetails put into scope via stringification
+        Object.assign(node, getNodeDetails(node.element));
+        // avoid circular JSON concerns
+        node.element = node.any = node.all = node.none = undefined;
+      });
+
+      // Ensure errors can be serialized over the protocol
+      if (result.error instanceof Error) {
+        result.error = {
+          name: result.error.name,
+          message: result.error.message,
+          stack: result.error.stack,
+          errorNode: result.error.errorNode,
+        };
+      }
+    };
+
     // Augment the node objects with outerHTML snippet & custom path string
-    axeResult.violations.forEach(v => v.nodes.forEach(node => {
-      node.path = getNodePath(node.element);
-      node.snippet = getOuterHTMLSnippet(node.element);
-      // avoid circular JSON concerns
-      node.element = node.any = node.all = node.none = undefined;
-    }));
+    axeResults.violations.forEach(augmentAxeNodes);
+    axeResults.incomplete.forEach(augmentAxeNodes);
 
     // We only need violations, and circular references are possible outside of violations
-    axeResult = {violations: axeResult.violations};
-    return axeResult;
+    axeResults = {
+      violations: axeResults.violations,
+      notApplicable: axeResults.inapplicable,
+      incomplete: axeResults.incomplete,
+      version: axeResults.testEngine.version,
+    };
+    return axeResults;
   });
-
-  // Adapted from DevTools' SDK.DOMNode.prototype.path
-  //   https://github.com/ChromeDevTools/devtools-frontend/blob/7a2e162ddefd/front_end/sdk/DOMModel.js#L530-L552
-  // TODO: Doesn't handle frames or shadow roots...
-  function getNodePath(node) {
-    function getNodeIndex(node) {
-      let index = 0;
-      while (node = node.previousSibling) {
-        // skip empty text nodes
-        if (node.nodeType === Node.TEXT_NODE &&
-          node.textContent.trim().length === 0) continue;
-        index++;
-      }
-      return index;
-    }
-
-    const path = [];
-    while (node && node.parentNode) {
-      const index = getNodeIndex(node);
-      path.push([index, node.nodeName]);
-      node = node.parentNode;
-    }
-    path.reverse();
-    return path.join(',');
-  }
-
-  /**
-   * Gets the opening tag text of the given node.
-   * @param {!Node}
-   * @return {string}
-   */
-  function getOuterHTMLSnippet(node) {
-    const reOpeningTag = /^.*?\>/;
-    const match = node.outerHTML.match(reOpeningTag);
-    return match && match[0];
-  }
 }
 
 class Accessibility extends Gatherer {
   /**
-   * @param {!Object} options
-   * @return {!Promise<{violations: !Array}>}
+   * @param {LH.Gatherer.FRTransitionalContext} passContext
+   * @return {Promise<LH.Artifacts.Accessibility>}
    */
-  afterPass(options) {
-    const driver = options.driver;
+  afterPass(passContext) {
+    const driver = passContext.driver;
     const expression = `(function () {
+      ${pageFunctions.getNodeDetailsString};
       ${axeLibSource};
       return (${runA11yChecks.toString()}());
     })()`;
 
-    return driver.evaluateAsync(expression).then(returnedValue => {
+    return driver.evaluateAsync(expression, {useIsolation: true}).then(returnedValue => {
       if (!returnedValue) {
         throw new Error('No axe-core results returned');
       }

@@ -2,50 +2,56 @@
 
 # folders
 .vscode/
+.github/
 assets/
+build/
 coverage/
+dist/
+proto/
 
-lighthouse-core/scripts/
+lighthouse-core/scripts/*
 lighthouse-core/test/
 lighthouse-core/third_party/src/
 lighthouse-viewer/
-lighthouse-extension/
+clients/
 lighthouse-cli/results/
+lighthouse-logger/
 
-# excluding cli/test minus smokehouse
-lighthouse-cli/test
-!lighthouse-cli/test/smokehouse
-!lighthouse-cli/test/fixtures/
+# keep a few scripts useful for CI
+!lighthouse-core/scripts/manual-chrome-launcher.js
+!lighthouse-core/scripts/download-chrome.sh
 
-!lighthouse-cli/index.js
-lighthouse-cli/*.map
-lighthouse-cli/commands/*.map
-lighthouse-cli/types/*.js
-lighthouse-cli/types/*.map
+# keep smokehouse tests, etc
+!lighthouse-cli/test
 
-node_modules/
 results/
+lantern-data/
+timings-data/
 
-plots/
+# ignore all folders named as such
+node_modules
+latest-run
+chromium-webtests
+.tmp
 
 # generated files
 **/pages/scripts/lighthouse-report.js
 *.report.html
 *.dom.html
-*.screenshots.html
-*.screenshots.json
 *.devtoolslog.json
 *.trace.json
 closure-error.log
 last-run-results.html
 latest.artifacts.log
 npm-debug.log
+yarn-error.log
 results.html
+*.lcov
 
 # dev files
-.appveyor.yml
 .DS_Store
 .editorconfig
 .eslintignore
 .eslintrc.js
 .travis.yml
+*.tgz

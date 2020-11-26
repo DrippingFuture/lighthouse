@@ -1,14 +1,14 @@
 /**
- * @license Copyright 2016 Google Inc. All Rights Reserved.
+ * @license Copyright 2016 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 'use strict';
 
-/* eslint-env mocha */
+/* eslint-env jest */
 
-const URL = require('../../lib/url-shim');
-const assert = require('assert');
+const URL = require('../../lib/url-shim.js');
+const assert = require('assert').strict;
 const superLongName =
     'https://example.com/thisIsASuperLongURLThatWillTriggerFilenameTruncationWhichWeWantToTest.js';
 
@@ -34,6 +34,19 @@ describe('URL Shim', () => {
   it('safely identifies invalid URLs', () => {
     assert.equal(URL.isValid(''), false);
     assert.equal(URL.isValid('eval(<context>):45:16'), false);
+  });
+
+  it('safely identifies allowed URL protocols', () => {
+    assert.ok(URL.isProtocolAllowed('http://google.com/'));
+    assert.ok(URL.isProtocolAllowed('https://google.com/'));
+    assert.ok(URL.isProtocolAllowed('chrome://version'));
+    assert.ok(URL.isProtocolAllowed('chrome-extension://blipmdconlkpinefehnmjammfjpmpbjk/popup.html'));
+  });
+
+  it('safely identifies disallowed URL protocols', () => {
+    assert.equal(URL.isProtocolAllowed('file:///i/am/a/fake/file.html'), false);
+    assert.equal(URL.isProtocolAllowed('ftp://user:password@private.ftp.example.com/index.html'), false);
+    assert.equal(URL.isProtocolAllowed('gopher://underground:9090/path'), false);
   });
 
   it('safely identifies same hosts', () => {
@@ -92,6 +105,52 @@ describe('URL Shim', () => {
     assert.equal(URL.getOrigin(urlD), null);
   });
 
+  describe('rootDomainsMatch', () => {
+    it('matches a subdomain and a root domain', () => {
+      const urlA = 'http://example.com/js/test.js';
+      const urlB = 'http://example.com/';
+      const urlC = 'http://sub.example.com/js/test.js';
+      const urlD = 'http://sub.otherdomain.com/js/test.js';
+
+      assert.ok(URL.rootDomainsMatch(urlA, urlB));
+      assert.ok(URL.rootDomainsMatch(urlA, urlC));
+      assert.ok(!URL.rootDomainsMatch(urlA, urlD));
+      assert.ok(!URL.rootDomainsMatch(urlB, urlD));
+    });
+
+    it(`doesn't break on urls without a valid host`, () => {
+      const urlA = 'http://example.com/js/test.js';
+      const urlB = 'data:image/jpeg;base64,foobar';
+      const urlC = 'anonymous:90';
+      const urlD = '!!garbage';
+      const urlE = 'file:///opt/lighthouse/index.js';
+
+      assert.ok(!URL.rootDomainsMatch(urlA, urlB));
+      assert.ok(!URL.rootDomainsMatch(urlA, urlC));
+      assert.ok(!URL.rootDomainsMatch(urlA, urlD));
+      assert.ok(!URL.rootDomainsMatch(urlA, urlE));
+      assert.ok(!URL.rootDomainsMatch(urlB, urlC));
+      assert.ok(!URL.rootDomainsMatch(urlB, urlD));
+      assert.ok(!URL.rootDomainsMatch(urlB, urlE));
+    });
+
+    it(`matches tld plus domains`, () => {
+      const coUkA = 'http://example.co.uk/js/test.js';
+      const coUkB = 'http://sub.example.co.uk/js/test.js';
+      const testUkA = 'http://example.test.uk/js/test.js';
+      const testUkB = 'http://sub.example.test.uk/js/test.js';
+      const ltdBrA = 'http://example.ltd.br/js/test.js';
+      const ltdBrB = 'http://sub.example.ltd.br/js/test.js';
+      const privAtA = 'http://examplepriv.at/js/test.js';
+      const privAtB = 'http://sub.examplepriv.at/js/test.js';
+
+      assert.ok(URL.rootDomainsMatch(coUkA, coUkB));
+      assert.ok(URL.rootDomainsMatch(testUkA, testUkB));
+      assert.ok(URL.rootDomainsMatch(ltdBrA, ltdBrB));
+      assert.ok(URL.rootDomainsMatch(privAtA, privAtB));
+    });
+  });
+
   describe('getURLDisplayName', () => {
     it('respects numPathParts option', () => {
       const url = 'http://example.com/a/deep/nested/file.css';
@@ -123,6 +182,19 @@ describe('URL Shim', () => {
       assert.equal(result, '/file-f303dec\u2026-somethingmore.css');
     });
 
+    it('Elides google-fonts hashes', () => {
+      const url = 'https://fonts.gstatic.com/s/droidsans/v8/s-BiyweUPV0v-yRb-cjciAzyDMXhdD8sAj6OAJTFsBI.woff2';
+      const result = URL.getURLDisplayName(url);
+      assert.equal(result, '\u2026v8/s-BiyweUP\u2026.woff2');
+    });
+
+    it('Elides long number sequences', () => {
+      const url = 'http://cdn.cnn.com/cnnnext/dam/assets/150507173438-11-week-in-photos-0508-large-169.jpg';
+      const result = URL.getURLDisplayName(url);
+      assert.equal(result, '\u2026assets/150\u2026-11-week-in-photos-0508-large-169.jpg');
+    });
+
+
     it('Elides query strings when can first parameter', () => {
       const url = 'http://example.com/file.css?aQueryString=true&other_long_query_stuff=false&some_other_super_long_query';
       const result = URL.getURLDisplayName(url);
@@ -145,7 +217,7 @@ describe('URL Shim', () => {
       const url = superLongName.slice(0, -3) +
           '-f303dec6eec305a4fab8025577db3c2feb418148ac75ba378281399fb1ba670b.css';
       const result = URL.getURLDisplayName(url);
-      const expected = '/thisIsASuperLongURLThatWillTriggerFilenameTruncationWhichW\u2026.css';
+      const expected = '/thisIsASu\u2026.css';
       assert.equal(result, expected);
     });
 
@@ -194,7 +266,7 @@ describe('URL Shim', () => {
       const equalPairs = [
         ['https://example.com/', 'https://example.com/'],
         ['https://example.com/', 'https://example.com/#/login?_k=dt915a'],
-        ['https://example.com/', 'https://example.com#anchor']
+        ['https://example.com/', 'https://example.com#anchor'],
       ];
       equalPairs.forEach(pair => assert.ok(URL.equalWithExcludedFragments(...pair)));
     });
@@ -204,7 +276,7 @@ describe('URL Shim', () => {
         ['https://example.com/', 'https://www.example.com/'],
         ['https://example.com/', 'http://example.com/'],
         ['https://example.com/#/login?_k=dt915a', 'https://example.com/index.html#/login?_k=dt915a'],
-        ['https://example.com#anchor', 'https://example.com?t=1#anchor']
+        ['https://example.com#anchor', 'https://example.com?t=1#anchor'],
       ];
       unequalPairs.forEach(pair => assert.ok(!URL.equalWithExcludedFragments(...pair)));
     });
@@ -214,6 +286,15 @@ describe('URL Shim', () => {
       const pair = [
         'chrome://settings/',
         'chrome://chrome/settings/',
+      ];
+      assert.ok(URL.equalWithExcludedFragments(...pair));
+    });
+
+    // https://github.com/GoogleChrome/lighthouse/pull/3941#discussion_r154026009
+    it('canonicalizes chrome:// urls without a trailing slash', () => {
+      const pair = [
+        'chrome://version/',
+        'chrome://version',
       ];
       assert.ok(URL.equalWithExcludedFragments(...pair));
     });

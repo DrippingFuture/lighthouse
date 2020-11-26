@@ -1,5 +1,5 @@
 /**
- * @license Copyright 2017 Google Inc. All Rights Reserved.
+ * @license Copyright 2017 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
@@ -8,125 +8,98 @@
 /** @fileoverview
  *  This audit evaluates if a page's load performance is fast enough for it to be considered a PWA.
  *  We are doublechecking that the network requests were throttled (or slow on their own)
- *  Afterwards, we report if the TTFI is less than 10 seconds.
+ *  Afterwards, we report if the TTI is less than 10 seconds.
  */
 
-const Audit = require('./audit');
-const URL = require('../lib/url-shim');
-const Emulation = require('../lib/emulation');
-const Util = require('../report/v2/renderer/util.js');
+const isDeepEqual = require('lodash.isequal');
+const Audit = require('./audit.js');
+const mobileThrottling = require('../config/constants.js').throttling.mobileSlow4G;
+const Interactive = require('../computed/metrics/interactive.js');
+const i18n = require('../lib/i18n/i18n.js');
 
-// Maximum TTFI to be considered "fast" for PWA baseline checklist
+// Maximum TTI to be considered "fast" for PWA baseline checklist
 //   https://developers.google.com/web/progressive-web-apps/checklist
-const MAXIMUM_TTFI = 10 * 1000;
+const MAXIMUM_TTI = 10 * 1000;
 
-const WHITELISTED_STATUS_CODES = [307];
+const UIStrings = {
+  /** Imperative title of a Lighthouse audit that tells the user that their page has loaded fast enough to be considered a Progressive Web App. This is displayed in a list of audit titles that Lighthouse generates. */
+  title: 'Page load is fast enough on mobile networks',
+  /** Imperative title of a Lighthouse audit that tells the user that their page has loaded fast enough to be considered a Progressive Web App. This imperative title is shown to users when the web page has loaded too slowly to be considered a Progressive Web App. */
+  failureTitle: 'Page load is not fast enough on mobile networks',
+  /** Description of a Lighthouse audit that tells the user *why* they need to load fast enough on mobile networks. This is displayed after a user expands the section to see more. No character length limits. 'Learn More' becomes link text to additional documentation. */
+  description: 'A fast page load over a cellular network ensures a good mobile user experience. [Learn more](https://web.dev/load-fast-enough-for-pwa/).',
+  /** Label for the audit identifying the time it took for the page to become interactive. */
+  displayValueText: 'Interactive at {timeInMs, number, seconds}\xa0s',
+  /** Label for the audit identifying the time it took for the page to become interactive on a mobile network. */
+  displayValueTextWithOverride: 'Interactive on simulated mobile network at ' +
+  '{timeInMs, number, seconds}\xa0s',
+  /** Explanatory message displayed when a web page loads too slowly to be considered quickly interactive. This references another Lighthouse auditing category, "Performance", that can give additional details on performance debugging.  */
+  explanationLoadSlow: 'Your page loads too slowly and is not interactive within 10 seconds. ' +
+    'Look at the opportunities and diagnostics in the "Performance" section to learn how to ' +
+    'improve.',
+};
+
+const str_ = i18n.createMessageInstanceIdFn(__filename, UIStrings);
 
 class LoadFastEnough4Pwa extends Audit {
   /**
-   * @return {!AuditMeta}
+   * @return {LH.Audit.Meta}
    */
   static get meta() {
     return {
-      category: 'PWA',
-      name: 'load-fast-enough-for-pwa',
-      description: 'Page load is fast enough on 3G',
-      failureDescription: 'Page load is not fast enough on 3G',
-      helpText: 'A fast page load over a 3G network ensures a good mobile user experience. ' +
-          '[Learn more](https://developers.google.com/web/tools/lighthouse/audits/fast-3g).',
-      requiredArtifacts: ['traces', 'devtoolsLogs']
+      id: 'load-fast-enough-for-pwa',
+      title: str_(UIStrings.title),
+      failureTitle: str_(UIStrings.failureTitle),
+      description: str_(UIStrings.description),
+      requiredArtifacts: ['traces', 'devtoolsLogs'],
     };
   }
 
   /**
-   * @param {!Artifacts} artifacts
-   * @return {!AuditResult}
+   * @param {LH.Artifacts} artifacts
+   * @param {LH.Audit.Context} context
+   * @return {Promise<LH.Audit.Product>}
    */
-  static audit(artifacts) {
-    const devtoolsLogs = artifacts.devtoolsLogs[Audit.DEFAULT_PASS];
-    return artifacts.requestNetworkRecords(devtoolsLogs).then(networkRecords => {
-      const firstRequestLatenciesByOrigin = new Map();
-      networkRecords.forEach(record => {
-        // Ignore requests that don't have valid origin, timing data, came from the cache, were
-        // redirected by Chrome without going to the network, or are not finished.
-        const fromCache = record._fromDiskCache || record._fromMemoryCache;
-        const origin = URL.getOrigin(record._url);
-        if (!origin || !record._timing || fromCache ||
-            WHITELISTED_STATUS_CODES.includes(record.statusCode) || !record.finished) {
-          return;
-        }
+  static async audit(artifacts, context) {
+    const trace = artifacts.traces[Audit.DEFAULT_PASS];
+    const devtoolsLog = artifacts.devtoolsLogs[Audit.DEFAULT_PASS];
 
-        // Disregard requests with an invalid start time, (H2 request start times are sometimes less
-        // than issue time and even negative which throws off timing)
-        if (record._startTime < record._issueTime) {
-          return;
-        }
+    // If throttling was default devtools or lantern slow 4G throttling, then reuse the given settings
+    // Otherwise, we'll force the usage of lantern slow 4G.
+    const settingOverrides = {throttlingMethod: 'simulate', throttling: mobileThrottling};
 
-        // Use DevTools' definition of Waiting latency: https://github.com/ChromeDevTools/devtools-frontend/blob/66595b8a73a9c873ea7714205b828866630e9e82/front_end/network/RequestTimingView.js#L164
-        const latency = record._timing.receiveHeadersEnd - record._timing.sendEnd;
-        const latencyInfo = {
-          url: record._url,
-          startTime: record._startTime,
-          origin,
-          latency,
-        };
+    // Override settings for interactive if provided throttling was used or network
+    // throttling was not consistent with standard `mobile network throttling`
+    const override = context.settings.throttlingMethod === 'provided' ||
+      !isDeepEqual(context.settings.throttling, mobileThrottling);
 
-        // Only examine the first request per origin to reduce noisiness from cases like H2 push
-        // where individual request latency may not apply.
-        const existing = firstRequestLatenciesByOrigin.get(origin);
-        if (!existing || latencyInfo.startTime < existing.startTime) {
-          firstRequestLatenciesByOrigin.set(origin, latencyInfo);
-        }
-      });
+    const displayValueTemplate = override ?
+      UIStrings.displayValueTextWithOverride : UIStrings.displayValueText;
 
-      let firstRequestLatencies = Array.from(firstRequestLatenciesByOrigin.values());
-      const latency3gMin = Emulation.settings.TYPICAL_MOBILE_THROTTLING_METRICS.targetLatency - 10;
-      const areLatenciesAll3G = firstRequestLatencies.every(val => val.latency > latency3gMin);
-      firstRequestLatencies = firstRequestLatencies.map(item => ({
-        url: item.url,
-        latency: Util.formatNumber(item.latency, 2)
-      }));
+    const settings = override ? Object.assign({}, context.settings, settingOverrides) :
+      context.settings;
 
-      const trace = artifacts.traces[Audit.DEFAULT_PASS];
-      return artifacts.requestFirstInteractive(trace).then(firstInteractive => {
-        const timeToFirstInteractive = firstInteractive.timeInMs;
-        const isFast = timeToFirstInteractive < MAXIMUM_TTFI;
+    const metricComputationData = {trace, devtoolsLog, settings};
+    const tti = await Interactive.request(metricComputationData, context);
 
-        const extendedInfo = {
-          value: {areLatenciesAll3G, firstRequestLatencies, isFast, timeToFirstInteractive}
-        };
+    const score = Number(tti.timing < MAXIMUM_TTI);
 
-        const details = Audit.makeTableDetails([
-          {key: 'url', itemType: 'url', text: 'URL'},
-          {key: 'latency', itemType: 'text', text: 'Latency (ms)'},
-        ], firstRequestLatencies);
+    let displayValue;
+    let explanation;
+    if (!score) {
+      displayValue = str_(displayValueTemplate, {timeInMs: tti.timing});
+      explanation = str_(UIStrings.explanationLoadSlow);
+    }
 
-        if (!isFast) {
-          return {
-            rawValue: false,
-            // eslint-disable-next-line max-len
-            debugString: `First Interactive was at ${Util.formatMilliseconds(timeToFirstInteractive)}. More details in the "Performance" section.`,
-            extendedInfo
-          };
-        }
-
-        if (!areLatenciesAll3G) {
-          return {
-            rawValue: true,
-            // eslint-disable-next-line max-len
-            debugString: `First Interactive was found at ${Util.formatMilliseconds(timeToFirstInteractive)}, however, the network request latencies were not sufficiently realistic, so the performance measurements cannot be trusted.`,
-            extendedInfo,
-            details
-          };
-        }
-
-        return {
-          rawValue: true,
-          extendedInfo
-        };
-      });
-    });
+    return {
+      score,
+      displayValue,
+      explanation,
+      numericValue: tti.timing,
+      numericUnit: 'millisecond',
+    };
   }
 }
 
 module.exports = LoadFastEnough4Pwa;
+module.exports.UIStrings = UIStrings;

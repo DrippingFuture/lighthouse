@@ -4,22 +4,17 @@
 
 **/node_modules/**
 **/third_party/**
+**/generated/**
+**/source-maps/**
 
-**/dist/**
-lighthouse-extension/app/scripts
+lighthouse-cli/test/fixtures/byte-efficiency/bundle.js
 
+/dist/**
 
-**/closure/*/*
 coverage/**
 
-# Typescript compiled
-!lighthouse-cli/index.js
-lighthouse-cli/*.js
-lighthouse-cli/commands/*.js
-lighthouse-cli/types/*.js
-!chrome-launcher/manual-chrome-launcher.js
-!chrome-launcher/compiled-check.js
-chrome-launcher/*.js
+!.eslintrc.js
 
-# Generated files
-plots/out*
+lighthouse-core/scripts/legacy-javascript/variants
+
+third-party/chromium-webtests

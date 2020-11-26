@@ -1,154 +1,162 @@
 /**
- * @license Copyright 2017 Google Inc. All Rights Reserved.
+ * @license Copyright 2017 The Lighthouse Authors. All Rights Reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 
- /**
+/**
   * @fileoverview Determines optimized jpeg/webp filesizes for all same-origin and dataURI images by
   *   running the images through canvas in the browser context.
   */
 'use strict';
 
-const Gatherer = require('../gatherer');
-const URL = require('../../../lib/url-shim');
+const log = require('lighthouse-logger');
+const Gatherer = require('../gatherer.js');
+const URL = require('../../../lib/url-shim.js');
+const NetworkRequest = require('../../../lib/network-request.js');
+const Sentry = require('../../../lib/sentry.js');
+const Driver = require('../../driver.js'); // eslint-disable-line no-unused-vars
 
-/* global document, Image, atob */
+// Image encoding can be slow and we don't want to spend forever on it.
+// Cap our encoding to 5 seconds, anything after that will be estimated.
+const MAX_TIME_TO_SPEND_ENCODING = 5000;
+// Cap our image file size at 2MB, anything bigger than that will be estimated.
+const MAX_RESOURCE_SIZE_TO_ENCODE = 2000 * 1024;
 
-/**
- * Runs in the context of the browser
- * @param {string} url
- * @return {!Promise<{jpeg: Object, webp: Object}>}
- */
-/* istanbul ignore next */
-function getOptimizedNumBytes(url) {
-  return new Promise(function(resolve, reject) {
-    const img = new Image();
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
+const JPEG_QUALITY = 0.92;
+const WEBP_QUALITY = 0.85;
 
-    function getTypeStats(type, quality) {
-      const dataURI = canvas.toDataURL(type, quality);
-      const base64 = dataURI.slice(dataURI.indexOf(',') + 1);
-      return {base64: base64.length, binary: atob(base64).length};
-    }
+const MINIMUM_IMAGE_SIZE = 4096; // savings of <4 KiB will be ignored in the audit anyway
 
-    img.addEventListener('error', reject);
-    img.addEventListener('load', () => {
-      try {
-        canvas.height = img.height;
-        canvas.width = img.width;
-        context.drawImage(img, 0, 0);
+const IMAGE_REGEX = /^image\/((x|ms|x-ms)-)?(png|bmp|jpeg)$/;
 
-        const jpeg = getTypeStats('image/jpeg', 0.92);
-        const webp = getTypeStats('image/webp', 0.85);
-
-        resolve({jpeg, webp});
-      } catch (err) {
-        reject(err);
-      }
-    }, false);
-
-    img.src = url;
-  });
-}
+/** @typedef {{requestId: string, url: string, mimeType: string, resourceSize: number}} SimplifiedNetworkRecord */
 
 class OptimizedImages extends Gatherer {
+  constructor() {
+    super();
+    this._encodingStartAt = 0;
+  }
+
   /**
-   * @param {string} pageUrl
-   * @param {!NetworkRecords} networkRecords
-   * @return {!Array<{url: string, isBase64DataUri: boolean, mimeType: string, resourceSize: number}>}
+   * @param {Array<LH.Artifacts.NetworkRequest>} networkRecords
+   * @return {Array<SimplifiedNetworkRecord>}
    */
-  static filterImageRequests(pageUrl, networkRecords) {
+  static filterImageRequests(networkRecords) {
+    /** @type {Set<string>} */
     const seenUrls = new Set();
     return networkRecords.reduce((prev, record) => {
-      if (seenUrls.has(record._url) || !record.finished) {
+      // Skip records that we've seen before, never finished, or came from child targets (OOPIFS).
+      if (seenUrls.has(record.url) || !record.finished || record.sessionId) {
         return prev;
       }
 
-      seenUrls.add(record._url);
-      const isOptimizableImage = /image\/(png|bmp|jpeg)/.test(record._mimeType);
-      const isSameOrigin = URL.originsMatch(pageUrl, record._url);
-      const isBase64DataUri = /^data:.{2,40}base64\s*,/.test(record._url);
+      seenUrls.add(record.url);
+      const isOptimizableImage = record.resourceType === NetworkRequest.TYPES.Image &&
+        IMAGE_REGEX.test(record.mimeType);
 
-      if (isOptimizableImage) {
+      const actualResourceSize = Math.min(record.resourceSize || 0, record.transferSize || 0);
+      if (isOptimizableImage && actualResourceSize > MINIMUM_IMAGE_SIZE) {
         prev.push({
-          isSameOrigin,
-          isBase64DataUri,
-          requestId: record._requestId,
-          url: record._url,
-          mimeType: record._mimeType,
-          resourceSize: record._resourceSize,
+          requestId: record.requestId,
+          url: record.url,
+          mimeType: record.mimeType,
+          resourceSize: actualResourceSize,
         });
       }
 
       return prev;
-    }, []);
+    }, /** @type {Array<SimplifiedNetworkRecord>} */ ([]));
   }
 
   /**
-   * @param {!Object} driver
-   * @param {{url: string, isBase64DataUri: boolean, resourceSize: number}} networkRecord
-   * @return {!Promise<?{originalSize: number, jpegSize: number, webpSize: number}>}
+   * @param {Driver} driver
+   * @param {string} requestId
+   * @param {'jpeg'|'webp'} encoding Either webp or jpeg.
+   * @return {Promise<LH.Crdp.Audits.GetEncodedResponseResponse>}
    */
-  calculateImageStats(driver, networkRecord) {
-    if (!networkRecord.isSameOrigin && !networkRecord.isBase64DataUri) {
-      // Processing of cross-origin images is buggy and very slow, disable for now
-      // See https://github.com/GoogleChrome/lighthouse/issues/1853
-      // See https://github.com/GoogleChrome/lighthouse/issues/2146
-      return Promise.resolve(null);
+  _getEncodedResponse(driver, requestId, encoding) {
+    requestId = NetworkRequest.getRequestIdForBackend(requestId);
+
+    const quality = encoding === 'jpeg' ? JPEG_QUALITY : WEBP_QUALITY;
+    const params = {requestId, encoding, quality, sizeOnly: true};
+    return driver.sendCommand('Audits.getEncodedResponse', params);
+  }
+
+  /**
+   * @param {Driver} driver
+   * @param {SimplifiedNetworkRecord} networkRecord
+   * @return {Promise<{originalSize: number, jpegSize?: number, webpSize?: number}>}
+   */
+  async calculateImageStats(driver, networkRecord) {
+    const originalSize = networkRecord.resourceSize;
+    // Once we've hit our execution time limit or when the image is too big, don't try to re-encode it.
+    // Images in this execution path will fallback to byte-per-pixel heuristics on the audit side.
+    if (Date.now() - this._encodingStartAt > MAX_TIME_TO_SPEND_ENCODING ||
+        originalSize > MAX_RESOURCE_SIZE_TO_ENCODE) {
+      return {originalSize, jpegSize: undefined, webpSize: undefined};
     }
 
-    return Promise.resolve(networkRecord.url).then(uri => {
-      const script = `(${getOptimizedNumBytes.toString()})(${JSON.stringify(uri)})`;
-      return driver.evaluateAsync(script).then(stats => {
-        if (!stats) {
-          return null;
-        }
+    const jpegData = await this._getEncodedResponse(driver, networkRecord.requestId, 'jpeg');
+    const webpData = await this._getEncodedResponse(driver, networkRecord.requestId, 'webp');
 
-        const isBase64DataUri = networkRecord.isBase64DataUri;
-        const base64Length = networkRecord.url.length - networkRecord.url.indexOf(',') - 1;
-        return {
-          originalSize: isBase64DataUri ? base64Length : networkRecord.resourceSize,
-          jpegSize: isBase64DataUri ? stats.jpeg.base64 : stats.jpeg.binary,
-          webpSize: isBase64DataUri ? stats.webp.base64 : stats.webp.binary,
-        };
-      });
-    });
+    return {
+      originalSize,
+      jpegSize: jpegData.encodedSize,
+      webpSize: webpData.encodedSize,
+    };
   }
 
   /**
-   * @param {!Object} driver
-   * @param {!Array<!Object>} imageRecords
-   * @return {!Promise<!Array<!Object>>}
+   * @param {Driver} driver
+   * @param {Array<SimplifiedNetworkRecord>} imageRecords
+   * @return {Promise<LH.Artifacts['OptimizedImages']>}
    */
-  computeOptimizedImages(driver, imageRecords) {
-    return imageRecords.reduce((promise, record) => {
-      return promise.then(results => {
-        return this.calculateImageStats(driver, record)
-          .catch(err => ({failed: true, err}))
-          .then(stats => {
-            if (!stats) {
-              return results;
-            }
+  async computeOptimizedImages(driver, imageRecords) {
+    this._encodingStartAt = Date.now();
 
-            return results.concat(Object.assign(stats, record));
-          });
-      });
-    }, Promise.resolve([]));
+    /** @type {LH.Artifacts['OptimizedImages']} */
+    const results = [];
+
+    for (const record of imageRecords) {
+      try {
+        const stats = await this.calculateImageStats(driver, record);
+        /** @type {LH.Artifacts.OptimizedImage} */
+        const image = {failed: false, ...stats, ...record};
+        results.push(image);
+      } catch (err) {
+        log.warn('optimized-images', err.message);
+
+        // Track this with Sentry since these errors aren't surfaced anywhere else, but we don't
+        // want to tank the entire run due to a single image.
+        Sentry.captureException(err, {
+          tags: {gatherer: 'OptimizedImages'},
+          extra: {imageUrl: URL.elideDataURI(record.url)},
+          level: 'warning',
+        });
+
+        /** @type {LH.Artifacts.OptimizedImageError} */
+        const imageError = {failed: true, errMsg: err.message, ...record};
+        results.push(imageError);
+      }
+    }
+
+    return results;
   }
 
   /**
-   * @param {!Object} options
-   * @param {{networkRecords: !Array<!NetworRecord>}} traceData
-   * @return {!Promise<!Array<!Object>}
+   * @param {LH.Gatherer.PassContext} passContext
+   * @param {LH.Gatherer.LoadData} loadData
+   * @return {Promise<LH.Artifacts['OptimizedImages']>}
    */
-  afterPass(options, traceData) {
-    const networkRecords = traceData.networkRecords;
-    const imageRecords = OptimizedImages.filterImageRequests(options.url, networkRecords);
+  afterPass(passContext, loadData) {
+    const networkRecords = loadData.networkRecords;
+    const imageRecords = OptimizedImages
+      .filterImageRequests(networkRecords)
+      .sort((a, b) => b.resourceSize - a.resourceSize);
 
     return Promise.resolve()
-      .then(_ => this.computeOptimizedImages(options.driver, imageRecords))
+      .then(_ => this.computeOptimizedImages(passContext.driver, imageRecords))
       .then(results => {
         const successfulResults = results.filter(result => !result.failed);
         if (results.length && !successfulResults.length) {

@@ -2,38 +2,33 @@
 
 The Lighthouse config object is the primary method of customizing Lighthouse to suit your use case. Using a custom config, you can limit the audits to run, add additional loads of the page under special conditions, add your own custom checks, tweak the scoring, and more.
 
-Read more about the [architecture of Lighthouse](https://github.com/GoogleChrome/lighthouse/blob/master/docs/architecture.md).
+Read more about the [architecture of Lighthouse](./architecture.md).
 
 ## Usage
 
 You can specify a custom config file when using Lighthouse through the CLI or consuming the npm module yourself.
 
-**custom-config.js**
+**custom-config.js file**
 ```js
 module.exports = {
-  passes: [{
-    recordTrace: true,
-    pauseBeforeTraceEndMs: 5000,
-    useThrottling: true,
-    gatherers: [],
-  }],
-
-  audits: [
-    'first-meaningful-paint',
-    'speed-index-metric',
-    'estimated-input-latency',
-    'first-interactive',
-    'consistently-interactive',
-  ]
+  extends: 'lighthouse:default',
+  settings: {
+    onlyAudits: [
+      'first-meaningful-paint',
+      'speed-index',
+      'first-cpu-idle',
+      'interactive',
+    ],
+  },
 };
 ```
 
-**CLI**
+**Use config file via CLI**
 ```sh
 lighthouse --config-path=path/to/custom-config.js https://example.com
 ```
 
-**Node**
+**Use config file via Node**
 ```js
 const lighthouse = require('lighthouse');
 const config = require('./path/to/custom-config.js');
@@ -51,9 +46,11 @@ lighthouse('https://example.com/', {port: 9222}, config);
 | categories | <code>Object&#124;undefined</code> |
 | groups | <code>Object&#124;undefined</code> |
 
-### `extends: string|boolean|undefined`
+### `extends: "lighthouse:default"|boolean|undefined`
 
-The extends property controls if your configuration should inherit from the default Lighthouse configuration. [Learn more.](#config-extension)
+The `extends` property controls if your configuration should inherit from the default Lighthouse configuration. [Learn more.](#config-extension)
+
+Both the values `"lighthouse:default"` and `true` will enable inheritance, while `false` and `undefined` will not.
 
 #### Example
 ```js
@@ -64,7 +61,7 @@ The extends property controls if your configuration should inherit from the defa
 
 ### `settings: Object|undefined`
 
-The settings property controls various aspects of running Lighthouse such as CPU/network throttling and audit whitelisting/blacklisting.
+The settings property controls various aspects of running Lighthouse such as CPU/network throttling and which audits should run.
 
 #### Example
 ```js
@@ -77,6 +74,8 @@ The settings property controls various aspects of running Lighthouse such as CPU
 ```
 
 #### Options
+For full list see [our config settings typedef](https://github.com/GoogleChrome/lighthouse/blob/575e29b8b6634bfb280bc820efea6795f3dd9017/types/externs.d.ts#L141-L186).
+
 | Name | Type | Description |
 | -- | -- | -- |
 | onlyCategories | `string[]` | Includes only the specified categories in the final report. Additive with `onlyAudits` and reduces the time to audit a page. |
@@ -89,6 +88,7 @@ The passes property controls how to load the requested URL and what information 
 
 Each `passes` entry defines basic settings such as how long to wait for the page to load and whether to record a trace file. Additionally a list of **gatherers** to use is defined per pass. Gatherers can read information from the page to generate artifacts which are later used by audits to provide you with a Lighthouse report. For more information on implementing a custom gatherer and the role they play in building a Lighthouse report, refer to the [recipes](https://github.com/GoogleChrome/lighthouse/blob/master/docs/recipes/custom-audit). Also note that `artifacts.devtoolsLogs` will be automatically populated for every pass. Gatherers also have access to this data within the `afterPass` as `traceData.devtoolsLog` (However, most will find the higher-level `traceData.networkRecords` more useful).
 
+For list of default pass values, see [our config constants](https://github.com/GoogleChrome/lighthouse/blob/8f500e00243e07ef0a80b39334bedcc8ddc8d3d0/lighthouse-core/config/constants.js#L50-L61).
 
 #### Example
 ```js
@@ -96,15 +96,13 @@ Each `passes` entry defines basic settings such as how long to wait for the page
   passes: [
     {
       passName: 'fastPass',
-      recordTrace: true,
-      useThrottling: false,
-      networkQuietThresholdMs: 0,
       gatherers: ['fast-gatherer'],
     },
     {
       passName: 'slowPass',
       recordTrace: true,
       useThrottling: true,
+      networkQuietThresholdMs: 5000,
       gatherers: ['slow-gatherer'],
     }
   ]
@@ -121,7 +119,7 @@ Each `passes` entry defines basic settings such as how long to wait for the page
 | networkQuietThresholdMs | `number` | The number of milliseconds since the last network request to wait before the page should be considered to have reached 'network quiet'. Used to ensure the page has had time for the full waterfall of network requests to complete before ending a trace. (Default: 5000) |
 | pauseAfterNetworkQuietMs | `number` | The number of milliseconds to wait after 'network quiet' before the pass can continue. Used to ensure the page has had time for post-network-quiet JavaScript to execute before ending a trace. (Default: 0) |
 | blockedUrlPatterns | `string[]` | URLs of requests to block while loading the page. Basic wildcard support using `*`.  |
-| gatherers | `string[]` | The list of gatherers to run on this pass. |
+| gatherers | `string[]` | The list of gatherers to run on this pass. This property is required and on extension will be concatenated with the existing set of gatherers. |
 
 ### `audits: string[]`
 
@@ -132,7 +130,7 @@ The audits property controls which audits to run and include with your Lighthous
 {
   audits: [
     'first-meaningful-paint',
-    'first-interactive',
+    'first-cpu-idle',
     'byte-efficiency/uses-optimized-images',
   ]
 }
@@ -141,7 +139,7 @@ The audits property controls which audits to run and include with your Lighthous
 
 ### `categories: Object|undefined`
 
-The categories property controls how to score and organize the audit results in the report. Each category defined in the config will have an entry in the `reportCategories` property of Lighthouse's output. The category output contains the child audit results along with an overall score for the category.
+The categories property controls how to score and organize the audit results in the report. Each category defined in the config will have an entry in the `categories` property of Lighthouse's output. The category output contains the child audit results along with an overall score for the category.
 
 **Note:** many modules consuming Lighthouse have no need to group or score all the audit results; in these cases, it's fine to omit a categories section.
 
@@ -150,12 +148,12 @@ The categories property controls how to score and organize the audit results in 
 {
   categories: {
     performance: {
-      name: 'Performance',
+      title: 'Performance',
       description: 'This category judges your performance',
-      audits: [
-        {id: 'first-meaningful-paint', weight: 2, group: 'perf-metric'},
-        {id: 'first-interactive', weight: 3, group: 'perf-metric'},
-        {id: 'consistently-interactive', weight: 5, group: 'perf-metric'},
+      auditRefs: [
+        {id: 'first-meaningful-paint', weight: 2, group: 'metrics'},
+        {id: 'first-cpu-idle', weight: 3, group: 'metrics'},
+        {id: 'interactive', weight: 5, group: 'metrics'},
       ],
     }
   }
@@ -165,12 +163,12 @@ The categories property controls how to score and organize the audit results in 
 #### Options
 | Name | Type | Description |
 | -- | -- | -- |
-| name | `string` | The display name of the category. |
+| title | `string` | The display name of the category. |
 | description | `string` | The displayed description of the category. |
-| audits | `Object[]` | The audits to include in the category. |
-| audits[$i].id | `string` | The ID of the audit to include. |
-| audits[$i].weight | `number` | The weight of the audit in the scoring of the category. |
-| audits[$i].group | `string` (optional) | The ID of the [display group](#groups-objectundefined) of the audit. |
+| auditRefs | `Object[]` | The audits to include in the category. |
+| auditRefs[$i].id | `string` | The ID of the audit to include. |
+| auditRefs[$i].weight | `number` | The weight of the audit in the scoring of the category. |
+| auditRefs[$i].group | `string` (optional) | The ID of the [display group](#groups-objectundefined) of the audit. |
 
 ### `groups: Object|undefined`
 
@@ -183,15 +181,15 @@ The groups property controls how to visually group audits within a category. For
 {
   categories: {
     performance: {
-      audits: [
-        {id: 'my-performance-metric', weight: 2, group: 'perf-metric'},
+      auditRefs: [
+        {id: 'my-performance-metric', weight: 2, group: 'metrics'},
       ],
     }
   },
   groups: {
-    'perf-metric': {
+    'metrics': {
       title: 'Metrics',
-      description: 'These metrics encapsulate your app\'s performance across a number of dimensions.'
+      description: 'These metrics encapsulate your web app\'s performance across a number of dimensions.'
     },
   }
 }
@@ -199,7 +197,11 @@ The groups property controls how to visually group audits within a category. For
 
 ## Config Extension
 
-The stock Lighthouse configurations can be extended if you only need to make small tweaks, such as adding an audit or skipping an audit, but wish to still run most of what Lighthouse offers. When adding the `extends: 'lighthouse:default'` property to your config, the default passes, audits, groups, and categories will be automatically included, allowing you modify settings or add additional audits to a pass. See [more examples below](#more-examples) to see different types of extension in action.
+The stock Lighthouse configurations can be extended if you only need to make small tweaks, such as adding an audit or skipping an audit, but wish to still run most of what Lighthouse offers. When adding the `extends: 'lighthouse:default'` property to your config, the default passes, audits, groups, and categories will be automatically included, allowing you modify settings or add additional audits to a pass.
+
+Please note that the `extends` property only supports extension of `lighthouse:default`. Other internal configs found in the [lighthouse-core/config](https://github.com/GoogleChrome/lighthouse/tree/master/lighthouse-core/config) directory can be used by importing the config object from file reference, or by using the [`--preset`](https://github.com/GoogleChrome/lighthouse#cli-options) CLI flag.
+
+See [more examples below](#more-examples) to view different types of extensions in action.
 
 **Config extension is the recommended way to run custom Lighthouse**. If there's a use case that extension doesn't currently solve, we'd love to [hear from you](https://github.com/GoogleChrome/lighthouse/issues/new)!
 
@@ -207,9 +209,9 @@ The stock Lighthouse configurations can be extended if you only need to make sma
 
 The best examples are the ones Lighthouse uses itself! There are several reference configuration files that are maintained as part of Lighthouse.
 
-* [lighthouse-core/config/default.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/default.js)
-* [lighthouse-core/config/perf.json](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/perf.json)
-* [lighthouse-core/config/plots-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/plots-config.js)
+* [lighthouse-core/config/default-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/default-config.js)
+* [lighthouse-core/config/lr-desktop-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/lr-desktop-config.js)
+* [lighthouse-core/config/lr-mobile-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/lr-mobile-config.js)
+* [lighthouse-core/config/perf-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/lighthouse-core/config/perf-config.js)
 * [docs/recipes/custom-audit/custom-config.js](https://github.com/GoogleChrome/lighthouse/blob/master/docs/recipes/custom-audit/custom-config.js)
-* [pwmetrics](https://github.com/paulirish/pwmetrics/blob/master/lib/lh-config.ts)
-
+* [pwmetrics](https://github.com/paulirish/pwmetrics/blob/v4.1.1/lib/perf-config.ts)
